@@ -29,7 +29,9 @@ const shuffle = <T,>(arr: T[]) => {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+    const t = a[i]!;
+    a[i] = a[j]!;
+    a[j] = t;
   }
   return a;
 };
@@ -221,7 +223,7 @@ function Game() {
             <div className="flex flex-col gap-[10px]">
               {STAGES.map((s, i) => {
                 const done = progress.includes(s.id);
-                const locked = i > 0 && !progress.includes(STAGES[i - 1].id);
+                const locked = i > 0 && !progress.includes(STAGES[i - 1]!.id);
                 return (
                   <button
                     key={s.id}
