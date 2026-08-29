@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { STAGES, PLAYER_MAX_HP, type Stage, type Question } from "@/data/stages";
 import heroArt from "@/assets/hero.png";
 
@@ -106,6 +106,29 @@ function Game() {
 
   const item = queue[qi % Math.max(queue.length, 1)];
 
+  const shuffled = useMemo<{ label: string; originalIndex: number }[]>(() => {
+    if (!item) return [];
+    return shuffle(item.opts.map((label, idx) => ({ label, originalIndex: idx })));
+  }, [item, qi, queue, stage?.id]);
+
+  const correctShuffledIndex = useMemo(
+    () => shuffled.findIndex((o) => o.originalIndex === item?.a),
+    [shuffled, item],
+  );
+
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (!item) return;
+    setCooldown(4);
+  }, [item, qi, queue, stage?.id]);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setInterval(() => setCooldown((c) => (c <= 1 ? 0 : c - 1)), 1000);
+    return () => clearInterval(id);
+  }, [cooldown]);
+
   const enterBattle = useCallback((s: Stage) => {
     setStage(s);
     setEnemyHp(s.maxHp);
@@ -118,9 +141,9 @@ function Game() {
   }, []);
 
   const answer = (i: number) => {
-    if (choice !== null || !stage || !item) return;
+    if (choice !== null || !stage || !item || cooldown > 0) return;
     setChoice(i);
-    const correct = i === item.a;
+    const correct = i === correctShuffledIndex;
     if (correct) {
       const next = streak + 1;
       const dmg = rand(stage.atkMin + 8, stage.atkMax + 10) + clamp(next - 1, 0, 5) * 3;
@@ -350,12 +373,19 @@ function Game() {
             <p className="mb-5 font-display text-[clamp(18px,4.2vw,22px)] font-semibold leading-snug">
               {item.q}
             </p>
-            <div className="grid grid-cols-1 gap-[10px] sm:grid-cols-2">
-              {item.opts.map((t, i) => {
+
+            {cooldown > 0 && (
+              <p className="mb-3 text-center font-mono text-xs text-primary animate-pulse">
+                Memproses energi... {Math.ceil(cooldown)}
+              </p>
+            )}
+
+            <div className={`grid grid-cols-1 gap-[10px] sm:grid-cols-2 ${cooldown > 0 ? "opacity-50" : ""}`}>
+              {shuffled.map((opt, i) => {
                 const state =
                   choice === null
                     ? "idle"
-                    : i === item.a
+                    : i === correctShuffledIndex
                       ? "correct"
                       : i === choice
                         ? "wrong"
@@ -363,7 +393,7 @@ function Game() {
                 return (
                   <button
                     key={i}
-                    disabled={choice !== null}
+                    disabled={choice !== null || cooldown > 0}
                     onClick={() => answer(i)}
                     className={`rounded-[10px] border px-3 py-3 text-center font-mono text-[15px] font-semibold transition-all ${
                       state === "correct"
@@ -375,7 +405,7 @@ function Game() {
                             : "border-border bg-surface-raised hover:-translate-y-0.5 hover:border-primary"
                     }`}
                   >
-                    {t}
+                    {opt.label}
                   </button>
                 );
               })}
@@ -384,11 +414,11 @@ function Game() {
             {choice !== null && (
               <div
                 className={`mt-4 rounded-[10px] border-l-[3px] bg-background/50 px-4 py-3 text-[13.5px] leading-relaxed text-muted-foreground ${
-                  choice === item.a ? "border-l-secondary" : "border-l-destructive"
+                  choice === correctShuffledIndex ? "border-l-secondary" : "border-l-destructive"
                 }`}
               >
                 <b className="text-foreground">
-                  {choice === item.a ? "Tebasan tepat sasaran." : "Serangan meleset."}
+                  {choice === correctShuffledIndex ? "Tebasan tepat sasaran." : "Serangan meleset."}
                 </b>{" "}
                 {item.ex}
               </div>
