@@ -84,8 +84,11 @@ const ATTACK_NAMES: Record<number, string> = {
   5: "Akar Pengikat",
 };
 
-const ANSWER_WINDOW_MS = (stageId: number) => Math.max(4500, 9000 - stageId * 800);
-const PARRY_WINDOW_MS = (stageId: number) => Math.max(2200, 4200 - stageId * 300);
+// Higher stages have objectively harder questions (rationalization, combined
+// forms at the boss), so the window grows with the stage instead of shrinking —
+// difficulty comes from the math itself, not from an ever-tighter clock.
+const ANSWER_WINDOW_MS = (stageId: number) => 8000 + stageId * 700; // 8s (stage 1) → 11.5s (boss)
+const PARRY_WINDOW_MS = (stageId: number) => 3500 + stageId * 300; // 3.5s (stage 1) → 5s (boss)
 
 const genParryQuestion = (level: number): ParryQuestion => {
   let a: number;
