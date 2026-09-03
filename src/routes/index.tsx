@@ -49,6 +49,14 @@ type Analytics = Record<AnalyticsKey, { benar: number; salah: number }>;
 type ItemKey = "potion" | "shield" | "revive" | "skip";
 type Inventory = Record<ItemKey, number>;
 type LeaderEntry = { name: string; score: number; hp: number; coins: number; title: string };
+type ParryQuestion = { q: string; opts: number[]; a: number };
+type ParryPhase = {
+  question: ParryQuestion;
+  moveType: number;
+  moveName: string;
+  choice: number | null;
+  result: "pending" | "success" | "fail";
+};
 
 const EMPTY_ANALYTICS: Analytics = {
   penyederhanaan: { benar: 0, salah: 0 },
@@ -66,6 +74,73 @@ const STAGE_TOPIC: AnalyticsKey[] = [
   "pemangkatan",
   "penyederhanaan",
 ];
+
+const ATTACK_NAMES: Record<number, string> = {
+  0: "Replikasi Akar",
+  1: "Serapan Energi",
+  2: "Serangan Ganda",
+  3: "Ilusi Akar",
+  4: "Lonjakan Eksponen",
+  5: "Akar Pengikat",
+};
+
+const ANSWER_WINDOW_MS = (stageId: number) => Math.max(4500, 9000 - stageId * 800);
+const PARRY_WINDOW_MS = (stageId: number) => Math.max(2200, 4200 - stageId * 300);
+
+const genParryQuestion = (level: number): ParryQuestion => {
+  let a: number;
+  let b: number;
+  let answer: number;
+  let qStr: string;
+  if (level <= 0) {
+    a = rand(1, 9);
+    b = rand(1, 9);
+    answer = a + b;
+    qStr = `${a} + ${b}`;
+  } else if (level === 1) {
+    a = rand(10, 19);
+    b = rand(1, 9);
+    const sub = Math.random() < 0.5;
+    answer = sub ? a - b : a + b;
+    qStr = `${a} ${sub ? "−" : "+"} ${b}`;
+  } else if (level === 2) {
+    a = rand(2, 9);
+    b = rand(2, 9);
+    answer = a * b;
+    qStr = `${a} × ${b}`;
+  } else if (level === 3) {
+    a = rand(20, 60);
+    b = rand(5, 20);
+    const sub = Math.random() < 0.5;
+    answer = sub ? a - b : a + b;
+    qStr = `${a} ${sub ? "−" : "+"} ${b}`;
+  } else if (level === 4) {
+    a = rand(3, 9);
+    b = rand(3, 9);
+    const c = rand(2, 10);
+    answer = a * b + c;
+    qStr = `${a} × ${b} + ${c}`;
+  } else {
+    a = rand(3, 9);
+    b = rand(3, 9);
+    const c = rand(2, 12);
+    const sub = Math.random() < 0.5;
+    answer = sub ? a * b - c : a * b + c;
+    qStr = `${a} × ${b} ${sub ? "−" : "+"} ${c}`;
+  }
+  const wrongs = new Set<number>();
+  let attempts = 0;
+  while (wrongs.size < 3 && attempts < 50) {
+    attempts++;
+    const delta = (rand(-6, 6) || 1) * (1 + Math.floor(attempts / 10));
+    const w = answer + delta;
+    if (w !== answer && w >= 0 && !wrongs.has(w)) wrongs.add(w);
+  }
+  let filler = answer + 101;
+  while (wrongs.size < 3) wrongs.add(filler++);
+  const opts = shuffle([answer, ...Array.from(wrongs)]);
+  return { q: `${qStr} = …`, opts, a: opts.indexOf(answer) };
+};
 
 const SHOP_ITEMS: {
   key: ItemKey;
@@ -202,6 +277,9 @@ function Game() {
   const [illusionIdx, setIllusionIdx] = useState<number | null>(null);
   const [bindTurns, setBindTurns] = useState(0);
   const [enraged, setEnraged] = useState(false);
+  const [timeLeftPct, setTimeLeftPct] = useState(1);
+  const [parry, setParry] = useState<ParryPhase | null>(null);
+  const [parryTimeLeftPct, setParryTimeLeftPct] = useState(1);
 
   const floatId = useRef(0);
 
@@ -245,7 +323,8 @@ function Game() {
 
   useEffect(() => {
     if (!item) return;
-    setCooldown(4);
+    setCooldown(2);
+    setTimeLeftPct(1);
   }, [item, qi, queue, stage?.id]);
 
   useEffect(() => {
@@ -253,6 +332,46 @@ function Game() {
     const id = setInterval(() => setCooldown((c) => (c <= 1 ? 0 : c - 1)), 1000);
     return () => clearInterval(id);
   }, [cooldown]);
+
+  // Speed timer: once the pre-answer cooldown ends, a shrinking window starts.
+  // Answering while more time remains grants a bigger damage multiplier;
+  // running out of time counts as a miss and opens an enemy attack (parry) phase.
+  useEffect(() => {
+    if (!item || !stage) return;
+    if (cooldown > 0 || choice !== null || parry) return;
+    const total = ANSWER_WINDOW_MS(stage.id);
+    const start = Date.now();
+    setTimeLeftPct(1);
+    const id = setInterval(() => {
+      const pct = clamp(1 - (Date.now() - start) / total, 0, 1);
+      setTimeLeftPct(pct);
+      if (pct <= 0) {
+        clearInterval(id);
+        handleTimeout();
+      }
+    }, 100);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item, qi, queue, stage?.id, cooldown, choice, parry]);
+
+  // Parry timer: while an enemy attack is telegraphed, the player has a short
+  // window to solve a quick math check to deflect it; timing out counts as a fail.
+  useEffect(() => {
+    if (!parry || parry.result !== "pending" || !stage) return;
+    const total = PARRY_WINDOW_MS(stage.id);
+    const start = Date.now();
+    setParryTimeLeftPct(1);
+    const id = setInterval(() => {
+      const pct = clamp(1 - (Date.now() - start) / total, 0, 1);
+      setParryTimeLeftPct(pct);
+      if (pct <= 0) {
+        clearInterval(id);
+        resolveParry(false, null);
+      }
+    }, 100);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parry?.result, stage?.id]);
 
   const enterBattle = useCallback((s: Stage) => {
     setStage(s);
@@ -267,6 +386,8 @@ function Game() {
     setBindTurns(0);
     setEnraged(false);
     setEnemyAtk({ min: s.atkMin, max: s.atkMax, mult: 1 });
+    setParry(null);
+    setTimeLeftPct(1);
     setScreen("brief");
   }, []);
 
@@ -336,9 +457,16 @@ function Game() {
     return { dmg, isCrit, hp };
   };
 
-  const enemySkillOnWrong = (s: Stage) => {
+  // Executes an enemy attack move. If `blocked` is true (the player parried
+  // successfully), the attack is fully deflected and no damage/effects land.
+  const applyEnemyMove = (moveType: number, s: Stage, blocked: boolean) => {
+    if (blocked) {
+      pushFloat("DITANGKIS!", "player");
+      setLog(`Tangkisan sempurna! Kamu mementahkan ${ATTACK_NAMES[moveType] ?? "serangan"} milik ${s.name}.`);
+      return;
+    }
     const base = () => rand(enemyAtk.min, enemyAtk.max) * enemyAtk.mult;
-    switch (s.id) {
+    switch (moveType) {
       case 0: {
         const heal = Math.round(s.maxHp * 0.05);
         setEnemyHp((hp) => clamp(hp + heal, 0, s.maxHp));
@@ -382,22 +510,62 @@ function Game() {
     }
   };
 
+  // Opens the parry phase: telegraphs the enemy's upcoming move (bosses draw
+  // randomly from every guardian's move set) and hands the player a quick
+  // math check whose difficulty scales with the stage.
+  const startParry = (s: Stage) => {
+    const moveType = s.boss ? rand(0, 5) : s.id;
+    setParry({
+      question: genParryQuestion(s.id),
+      moveType,
+      moveName: ATTACK_NAMES[moveType] ?? "Serangan",
+      choice: null,
+      result: "pending",
+    });
+  };
+
+  const resolveParry = (success: boolean, chosenIdx: number | null) => {
+    if (!parry || parry.result !== "pending" || !stage) return;
+    const moveType = parry.moveType;
+    const s = stage;
+    setParry((p) => (p ? { ...p, choice: chosenIdx, result: success ? "success" : "fail" } : p));
+    setTimeout(() => {
+      applyEnemyMove(moveType, s, success);
+      setParry(null);
+    }, success ? 650 : 850);
+  };
+
+  const handleTimeout = () => {
+    if (!stage || !item || choice !== null || parry) return;
+    setChoice(-2);
+    setStreak(0);
+    trackAnswer(false);
+    setLog("Waktu habis! Serangan mendekat...");
+    startParry(stage);
+  };
+
   const answer = (i: number) => {
-    if (choice !== null || !stage || !item || cooldown > 0) return;
+    if (choice !== null || !stage || !item || cooldown > 0 || parry) return;
     setChoice(i);
     const correct = i === correctShuffledIndex;
     trackAnswer(correct);
     if (correct) {
+      const speedMult = 1 + timeLeftPct; // 1x (last moment) .. 2x (instant)
       const next = streak + 1;
-      const base = rand(stage.atkMin + 8, stage.atkMax + 10) + clamp(next - 1, 0, 5) * 3;
+      const base = Math.round(
+        (rand(stage.atkMin + 8, stage.atkMax + 10) + clamp(next - 1, 0, 5) * 3) * speedMult,
+      );
       setStreak(next);
       const res = dealDamageToEnemy(base, stage);
+      const speedTag = speedMult >= 1.7 ? " · ⚡ Kilat!" : speedMult >= 1.35 ? " · Cepat!" : "";
       setLog(
-        `${res.isCrit ? "CRITICAL! " : ""}Tebasanmu melukai ${stage.name} sebesar ${res.dmg} · streak ${next}`,
+        `${res.isCrit ? "CRITICAL! " : ""}Tebasanmu melukai ${stage.name} sebesar ${res.dmg} · streak ${next}${speedTag}`,
       );
+      if (speedMult >= 1.35) pushFloat(`x${speedMult.toFixed(1)}`, "enemy");
     } else {
       setStreak(0);
-      enemySkillOnWrong(stage);
+      setLog("Serangan meleset...");
+      startParry(stage);
     }
     setTimeout(() => {
       setHit(null);
@@ -420,7 +588,7 @@ function Game() {
 
   const useItem = (key: ItemKey) => {
     if (!stage || inventory[key] <= 0) return;
-    if (bindTurns > 0) return;
+    if (bindTurns > 0 || parry) return;
     if (key === "potion") {
       setInventory((inv) => ({ ...inv, potion: inv.potion - 1 }));
       setPlayerHp((h) => clamp(h + 30, 0, PLAYER_MAX_HP));
@@ -710,7 +878,10 @@ function Game() {
             menjaga tiap lorong labirin ini, masing-masing menguasai satu bentuk kekuatan.{" "}
             <b className="text-foreground">Kamu</b> adalah penjelajah yang dipercaya menembusnya.
             Jawaban <b className="text-foreground">benar</b> adalah tebasan; jawaban{" "}
-            <b className="text-foreground">salah</b> membuka celah bagi musuh.
+            <b className="text-foreground">salah</b> membuka celah bagi musuh. Semakin{" "}
+            <b className="text-foreground">cepat</b> kamu menjawab, semakin besar kerusakannya — dan
+            saat musuh balas menyerang, kamu bisa <b className="text-foreground">menangkis</b> dengan
+            soal kilat sebelum serangannya mendarat.
           </p>
           <PrimaryButton onClick={() => setScreen("map")}>Masuki Labirin</PrimaryButton>
           <div className="mt-3">
@@ -801,8 +972,11 @@ function Game() {
           <h2 className="mb-2 text-center font-display text-xl font-semibold">
             {stage.name} muncul!
           </h2>
-          <p className="mb-5 text-center text-[14.5px] leading-relaxed text-muted-foreground">
+          <p className="mb-3 text-center text-[14.5px] leading-relaxed text-muted-foreground">
             {stage.intro}
+          </p>
+          <p className="mb-5 text-center font-mono text-xs text-primary">
+            ⚔ {stage.boss ? "Jurus Gabungan: menggabungkan seluruh jurus penjaga akar" : `Jurus Andalan: ${ATTACK_NAMES[stage.id]}`}
           </p>
           <PrimaryButton onClick={() => setScreen("battle")}>Bertarung</PrimaryButton>
           <div className="mt-3">
@@ -895,6 +1069,71 @@ function Game() {
             </p>
           </div>
 
+          {parry && stage && (
+            <Panel>
+              <Tag>{parry.result === "pending" ? "⚠ Serangan Masuk!" : parry.result === "success" ? "Tangkisan!" : "Terkena!"}</Tag>
+              <p className="mb-1 text-center font-display text-[clamp(16px,4vw,20px)] font-semibold leading-snug text-primary">
+                {stage.name} melancarkan {stage.boss ? "jurus gabungan " : ""}
+                {parry.moveName}!
+              </p>
+              <p className="mb-4 text-center text-[13px] text-muted-foreground">
+                {parry.result === "pending"
+                  ? "Jawab cepat untuk menangkis serangan ini."
+                  : parry.result === "success"
+                    ? "Tangkisan sempurna — serangan dimentahkan!"
+                    : "Tangkisan gagal — serangan menembus pertahananmu."}
+              </p>
+
+              {parry.result === "pending" && (
+                <div className="mb-4">
+                  <div className="h-[6px] overflow-hidden rounded-full bg-background/70 ring-1 ring-border/60">
+                    <div
+                      className="h-full transition-[width] duration-100"
+                      style={{
+                        width: `${parryTimeLeftPct * 100}%`,
+                        background:
+                          parryTimeLeftPct > 0.4 ? "var(--gradient-hp, var(--gold))" : "var(--ember)",
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <p className="mb-4 text-center font-display text-2xl font-bold">{parry.question.q}</p>
+              <div className="grid grid-cols-2 gap-[10px]">
+                {parry.question.opts.map((opt, i) => {
+                  const st =
+                    parry.result === "pending"
+                      ? "idle"
+                      : i === parry.question.a
+                        ? "correct"
+                        : i === parry.choice
+                          ? "wrong"
+                          : "dim";
+                  return (
+                    <button
+                      key={i}
+                      disabled={parry.result !== "pending"}
+                      onClick={() => resolveParry(i === parry.question.a, i)}
+                      className={`opt rounded-[10px] border px-3 py-3 text-center font-mono text-[15px] font-semibold transition-all ${
+                        st === "correct"
+                          ? "border-secondary bg-secondary/30 text-foreground"
+                          : st === "wrong"
+                            ? "border-destructive bg-destructive/30 text-foreground"
+                            : st === "dim"
+                              ? "border-border bg-surface-raised opacity-40"
+                              : "border-border bg-surface-raised hover:-translate-y-0.5 hover:border-primary"
+                      }`}
+                    >
+                      {opt}
+                    </button>
+                  );
+                })}
+              </div>
+            </Panel>
+          )}
+
+          {!parry && (
           <Panel>
             <Tag>{stage.cat}</Tag>
             <p className="mb-5 font-display text-[clamp(18px,4.2vw,22px)] font-semibold leading-snug">
@@ -905,6 +1144,29 @@ function Game() {
               <p className="mb-3 text-center font-mono text-xs text-primary animate-pulse">
                 Memproses energi... {Math.ceil(cooldown)}
               </p>
+            )}
+
+            {cooldown <= 0 && choice === null && (
+              <div className="mb-3">
+                <div className="mb-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+                  <span>⚡ Kecepatan Serangan</span>
+                  <span>{timeLeftPct < 1 ? `x${(1 + timeLeftPct).toFixed(1)}` : ""}</span>
+                </div>
+                <div className="h-[6px] overflow-hidden rounded-full bg-background/70 ring-1 ring-border/60">
+                  <div
+                    className="h-full transition-[width] duration-100"
+                    style={{
+                      width: `${timeLeftPct * 100}%`,
+                      background:
+                        timeLeftPct > 0.5
+                          ? "var(--gradient-hp, var(--gold))"
+                          : timeLeftPct > 0.2
+                            ? "var(--gold)"
+                            : "var(--ember)",
+                    }}
+                  />
+                </div>
+              </div>
             )}
 
             <div
@@ -974,18 +1236,23 @@ function Game() {
                 }`}
               >
                 <b className="text-foreground">
-                  {choice === correctShuffledIndex ? "Tebasan tepat sasaran." : "Serangan meleset."}
+                  {choice === correctShuffledIndex
+                    ? "Tebasan tepat sasaran."
+                    : choice === -2
+                      ? "Waktu habis."
+                      : "Serangan meleset."}
                 </b>{" "}
                 {item.ex}
               </div>
             )}
 
-            {choice !== null && enemyHp > 0 && playerHp > 0 && (
+            {choice !== null && enemyHp > 0 && playerHp > 0 && !parry && (
               <div className="mt-4">
                 <PrimaryButton onClick={nextQuestion}>Serang Lagi →</PrimaryButton>
               </div>
             )}
           </Panel>
+          )}
         </div>
       )}
 
